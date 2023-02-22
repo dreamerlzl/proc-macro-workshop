@@ -1,5 +1,14 @@
 use derive_builder::Builder;
 
+//#[derive(Builder)]
+//struct Command(u32);
+
+//#[derive(Builder)]
+//enum Command {
+//    Foo,
+//    Bar,
+//}
+
 #[derive(Builder)]
 pub struct Command {
     executable: String,

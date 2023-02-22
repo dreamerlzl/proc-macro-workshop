@@ -8,36 +8,31 @@ use syn::{
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tree = parse_macro_input!(input as DeriveInput);
+    let tree_span = tree.span();
     let name = tree.ident;
     let builder_name = Ident::new(&format!("{}Builder", name), name.span());
-    match build_struct_def(&name, &builder_name, &tree.data) {
-        Ok(tks) => {
-            let tokens = quote! {
-                impl #name {
-                    pub fn builder () -> #builder_name {
-                        #builder_name::default()
-                    }
-                }
-
-                #tks
-            };
-            tokens.into()
-        }
+    match build_struct_def(&name, &builder_name, &tree.data, tree_span) {
+        Ok(tks) => tks.into(),
         Err(e) => proc_macro::TokenStream::from(e.to_compile_error()),
     }
 }
 
-fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<TokenStream> {
+fn build_struct_def(
+    name: &Ident,
+    builder_name: &Ident,
+    data: &Data,
+    span: proc_macro2::Span,
+) -> Result<TokenStream> {
     let  Data::Struct(data) = data else {
-        unimplemented!()
+        return Err(Error::new(span, "Builder derive macro only supports struct"));
     };
     let Fields::Named(ref fields) = data.fields else {
-        unimplemented!()
+        return Err(Error::new(span, "Builder derive macro only supports named fields"));
     };
     let vec_len = fields.named.len();
     let mut field_list = Vec::with_capacity(vec_len);
+    let mut builder_init_list = Vec::with_capacity(vec_len);
     let mut method_list = Vec::with_capacity(vec_len);
-    let mut field_check_list = Vec::with_capacity(vec_len);
     let mut assign_field = Vec::with_capacity(vec_len);
 
     for field in fields.named.iter() {
@@ -45,15 +40,18 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
             let ty = &field.ty;
             match check_field_type(ty) {
                 FieldType::OptionType(raw_ty) => {
+                    builder_init_list.push(quote! {
+                        #name: None,
+                    });
                     field_list.push(quote! {
-                        #name: Option<#ty>,
+                        #name: Option<#raw_ty>,
                     });
                     assign_field.push(quote! {
-                        #name: self.#name.clone().flatten(),
+                        #name: self.#name.clone(),
                     });
                     method_list.push(quote! {
                         fn #name (&mut self, value: #raw_ty) -> &mut Self {
-                            self.#name = Option::Some(Option::Some(value));
+                            self.#name = Option::Some(value);
                             self
                         }
                     });
@@ -61,6 +59,9 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
                 FieldType::VecType(raw_ty) => {
                     // check whether there is an argument "builder"
                     if let Some(each) = get_builder_each(&field.attrs) {
+                        builder_init_list.push(quote! {
+                            #name: Vec::new(),
+                        });
                         field_list.push(quote! {
                             #name: #ty,
                         });
@@ -74,17 +75,14 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
                             #name: self.#name.drain(..).collect(),
                         });
                     } else {
+                        builder_init_list.push(quote! {
+                            #name: None,
+                        });
                         field_list.push(quote! {
                             #name: Option<#ty>,
                         });
-                        let name_str = name.to_string();
-                        field_check_list.push(quote! {
-                            if self.#name.is_none() {
-                                return Err(format!("{} can't be empty!", #name_str).into());
-                            }
-                        });
                         assign_field.push(quote! {
-                            #name: self.#name.take().unwrap(),
+                            #name: self.#name.take().ok_or(concat!(stringify!(#name), "is not set"))?,
                         });
                         method_list.push(quote! {
                             fn #name (&mut self, value: #ty) -> &mut Self {
@@ -95,17 +93,14 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
                     }
                 }
                 FieldType::RawType(_) => {
+                    builder_init_list.push(quote! {
+                        #name: None,
+                    });
                     field_list.push(quote! {
                         #name: Option<#ty>,
                     });
-                    let name_str = name.to_string();
-                    field_check_list.push(quote! {
-                        if self.#name.is_none() {
-                            return Err(format!("{} can't be empty!", #name_str).into());
-                        }
-                    });
                     assign_field.push(quote! {
-                        #name: self.#name.take().unwrap(),
+                        #name: self.#name.take().ok_or(concat!(stringify!(#name), "is not set"))?,
                     });
                     method_list.push(quote! {
                         fn #name (&mut self, value: #ty) -> &mut Self {
@@ -121,7 +116,14 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
         }
     }
     let result = quote! {
-        #[derive(Default, Debug)]
+        impl #name {
+            pub fn builder() -> #builder_name {
+                #builder_name {
+                    #(#builder_init_list)*
+                }
+            }
+        }
+
         pub struct #builder_name {
             #(#field_list)*
         }
@@ -130,7 +132,6 @@ fn build_struct_def(name: &Ident, builder_name: &Ident, data: &Data) -> Result<T
             #(#method_list)*
 
             pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
-                #(#field_check_list)*
                 Ok(#name {
                     #(#assign_field)*
                 })
