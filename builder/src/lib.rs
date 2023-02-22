@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Error, Fields, Ident,
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Error, Field, Fields, Ident,
     MetaList, MetaNameValue, NestedMeta, PathSegment, Result, Type,
 };
 
@@ -31,7 +31,7 @@ fn build_struct_def(tree: DeriveInput) -> Result<TokenStream> {
     for field in fields.named.iter() {
         if let Some(ref name) = field.ident {
             let ty = &field.ty;
-            match check_field_type(ty) {
+            match check_field_type(field)? {
                 FieldType::OptionType(raw_ty) => {
                     builder_init_list.push(quote! {
                         #name: None,
@@ -49,43 +49,25 @@ fn build_struct_def(tree: DeriveInput) -> Result<TokenStream> {
                         }
                     });
                 }
-                FieldType::VecType(raw_ty) => {
+                FieldType::VecType((raw_ty, Some(each))) => {
                     // check whether there is an argument "builder"
-                    if let Some(each) = get_builder_each(&field.attrs)? {
-                        builder_init_list.push(quote! {
-                            #name:  std::vec::Vec::new(),
-                        });
-                        field_list.push(quote! {
-                            #name: #ty,
-                        });
-                        method_list.push(quote! {
-                            fn #each (&mut self, value: #raw_ty) -> &mut Self {
-                                self.#name.push(value);
-                                self
-                            }
-                        });
-                        assign_field.push(quote! {
-                            #name: self.#name.drain(..).collect(),
-                        });
-                    } else {
-                        builder_init_list.push(quote! {
-                            #name: None,
-                        });
-                        field_list.push(quote! {
-                            #name: ::core::option::Option<#ty>,
-                        });
-                        assign_field.push(quote! {
-                            #name: self.#name.take().ok_or(concat!(stringify!(#name), "is not set"))?,
-                        });
-                        method_list.push(quote! {
-                            fn #name (&mut self, value: #ty) -> &mut Self {
-                                self.#name = ::core::option::Option::Some(value);
-                                self
-                            }
-                        });
-                    }
+                    builder_init_list.push(quote! {
+                        #name:  std::vec::Vec::new(),
+                    });
+                    field_list.push(quote! {
+                        #name: #ty,
+                    });
+                    method_list.push(quote! {
+                        fn #each (&mut self, value: #raw_ty) -> &mut Self {
+                            self.#name.push(value);
+                            self
+                        }
+                    });
+                    assign_field.push(quote! {
+                        #name: self.#name.drain(..).collect(),
+                    });
                 }
-                FieldType::RawType(_) => {
+                FieldType::RawType(_) | FieldType::VecType(_) => {
                     builder_init_list.push(quote! {
                         #name: None,
                     });
@@ -140,12 +122,14 @@ fn build_struct_def(tree: DeriveInput) -> Result<TokenStream> {
 #[allow(clippy::enum_variant_names)]
 enum FieldType {
     OptionType(Type),
-    VecType(Type),
+    // (inner_type, Option<builder(each = "ident")>)
+    VecType((Type, Option<Ident>)),
     RawType(Type),
     UnsupportedType,
 }
 
-fn check_field_type(ty: &Type) -> FieldType {
+fn check_field_type(field: &Field) -> Result<FieldType> {
+    let ty = &field.ty;
     use syn::{AngleBracketedGenericArguments, GenericArgument, Path, PathArguments, TypePath};
     use FieldType::*;
 
@@ -161,15 +145,15 @@ fn check_field_type(ty: &Type) -> FieldType {
         }) = segments.first()
         {
             if let (1, Some(GenericArgument::Type(t))) = (args.len(), args.first()) {
-                return match ident.to_string().as_str() {
-                    "Vec" => VecType(t.clone()),
+                return Ok(match ident.to_string().as_str() {
+                    "Vec" => VecType((t.clone(), get_builder_each(&field.attrs)?)),
                     "Option" => OptionType(t.clone()),
                     _ => UnsupportedType,
-                };
+                });
             }
         }
     }
-    RawType(ty.clone())
+    Ok(RawType(ty.clone()))
 }
 
 // check whether a builder(each = "name") attribute is annotated
