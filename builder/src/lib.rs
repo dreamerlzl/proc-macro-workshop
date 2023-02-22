@@ -8,22 +8,15 @@ use syn::{
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let tree = parse_macro_input!(input as DeriveInput);
-    let tree_span = tree.span();
-    let name = tree.ident;
-    let builder_name = Ident::new(&format!("{}Builder", name), name.span());
-    match build_struct_def(&name, &builder_name, &tree.data, tree_span) {
+    match build_struct_def(tree) {
         Ok(tks) => tks.into(),
         Err(e) => proc_macro::TokenStream::from(e.to_compile_error()),
     }
 }
 
-fn build_struct_def(
-    name: &Ident,
-    builder_name: &Ident,
-    data: &Data,
-    span: proc_macro2::Span,
-) -> Result<TokenStream> {
-    let  Data::Struct(data) = data else {
+fn build_struct_def(tree: DeriveInput) -> Result<TokenStream> {
+    let span = tree.span();
+    let  Data::Struct(data) = tree.data else {
         return Err(Error::new(span, "Builder derive macro only supports struct"));
     };
     let Fields::Named(ref fields) = data.fields else {
@@ -44,23 +37,23 @@ fn build_struct_def(
                         #name: None,
                     });
                     field_list.push(quote! {
-                        #name: Option<#raw_ty>,
+                        #name: ::core::option::Option<#raw_ty>,
                     });
                     assign_field.push(quote! {
                         #name: self.#name.clone(),
                     });
                     method_list.push(quote! {
                         fn #name (&mut self, value: #raw_ty) -> &mut Self {
-                            self.#name = Option::Some(value);
+                            self.#name = ::core::option::Option::Some(value);
                             self
                         }
                     });
                 }
                 FieldType::VecType(raw_ty) => {
                     // check whether there is an argument "builder"
-                    if let Some(each) = get_builder_each(&field.attrs) {
+                    if let Some(each) = get_builder_each(&field.attrs)? {
                         builder_init_list.push(quote! {
-                            #name: Vec::new(),
+                            #name:  std::vec::Vec::new(),
                         });
                         field_list.push(quote! {
                             #name: #ty,
@@ -79,14 +72,14 @@ fn build_struct_def(
                             #name: None,
                         });
                         field_list.push(quote! {
-                            #name: Option<#ty>,
+                            #name: ::core::option::Option<#ty>,
                         });
                         assign_field.push(quote! {
                             #name: self.#name.take().ok_or(concat!(stringify!(#name), "is not set"))?,
                         });
                         method_list.push(quote! {
                             fn #name (&mut self, value: #ty) -> &mut Self {
-                                self.#name = Option::Some(value);
+                                self.#name = ::core::option::Option::Some(value);
                                 self
                             }
                         });
@@ -97,14 +90,14 @@ fn build_struct_def(
                         #name: None,
                     });
                     field_list.push(quote! {
-                        #name: Option<#ty>,
+                        #name: ::core::option::Option<#ty>,
                     });
                     assign_field.push(quote! {
                         #name: self.#name.take().ok_or(concat!(stringify!(#name), "is not set"))?,
                     });
                     method_list.push(quote! {
                         fn #name (&mut self, value: #ty) -> &mut Self {
-                            self.#name = Option::Some(value);
+                            self.#name = ::core::option::Option::Some(value);
                             self
                         }
                     });
@@ -115,6 +108,9 @@ fn build_struct_def(
             }
         }
     }
+
+    let name = tree.ident;
+    let builder_name = Ident::new(&format!("{}Builder", name), name.span());
     let result = quote! {
         impl #name {
             pub fn builder() -> #builder_name {
@@ -131,8 +127,8 @@ fn build_struct_def(
         impl #builder_name {
             #(#method_list)*
 
-            pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
-                Ok(#name {
+            pub fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#name {
                     #(#assign_field)*
                 })
             }
@@ -177,11 +173,14 @@ fn check_field_type(ty: &Type) -> FieldType {
 }
 
 // check whether a builder(each = "name") attribute is annotated
-fn get_builder_each(attrs: &[Attribute]) -> Option<Ident> {
+// if user provides something like #[builder(eac = "arg")], then we should report an error instead
+// of ignoring it
+fn get_builder_each(attrs: &[Attribute]) -> Result<Option<Ident>> {
     for attr in attrs.iter() {
         let Ok(meta) = attr.parse_meta() else {
-            return None;
+            return Ok(None);
         };
+        let meta_span = meta.span();
         match meta {
             syn::Meta::List(MetaList { path, nested, .. }) if path.is_ident("builder") => {
                 if let Some(NestedMeta::Meta(syn::Meta::NameValue(MetaNameValue {
@@ -192,14 +191,20 @@ fn get_builder_each(attrs: &[Attribute]) -> Option<Ident> {
                 {
                     match lit {
                         syn::Lit::Str(s) if path.is_ident("each") => {
-                            return Some(format_ident!("{}", s.value()));
+                            return Ok(Some(format_ident!("{}", s.value())));
                         }
-                        _ => continue,
+                        // if the stuff inside builder is not each, report an error
+                        _ => {
+                            return Err(Error::new(
+                                meta_span,
+                                r#"expected `builder(each = "...")`"#,
+                            ))
+                        }
                     };
                 }
             }
             _ => continue,
         }
     }
-    None
+    Ok(None)
 }
