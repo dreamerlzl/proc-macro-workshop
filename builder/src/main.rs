@@ -1,10 +1,11 @@
 use derive_builder::Builder;
 
-#[derive(Builder, Debug)]
-pub struct Foo {
-    a: i32,
+#[derive(Builder)]
+pub struct Command {
+    executable: String,
+    args: Vec<String>,
+    env: Vec<String>,
+    current_dir: Option<String>,
 }
 
-fn main() {
-    let f = Foo::builder().a(2);
-}
+fn main() {}
